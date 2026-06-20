@@ -92,7 +92,7 @@ The `engine/` layer is designed to work for any puzzle where the state space can
 | Tool | Version | Purpose |
 |------|---------|---------|
 | TypeScript | 5.4 | Type safety throughout |
-| Vite | 5.3 | Build tool & dev server |
+| Vite | 8.0 | Build tool & dev server |
 | React | 18 | UI components |
 | Three.js | 0.165 | 3D WebGL rendering |
 

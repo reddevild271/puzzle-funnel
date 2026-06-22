@@ -172,6 +172,8 @@ export class FunnelViz {
    * pointer position cannot contaminate the first rotate delta.
    */
   private isPanMode = false;
+  /** Timestamp of the last rotation event (ms) — used to normalise velocity. */
+  private lastRotEventTime = 0;
 
   // ── Auto-rotate ───────────────────────────────────────────────────────────
   private autoRotating = true;
@@ -270,9 +272,8 @@ export class FunnelViz {
     this.worldGroup.add(new THREE.Mesh(sphereGeo, sphereMat));
 
     // ── Pointer interaction ─────────────────────────────────────────────────
-    // touch-action:none lets the browser deliver pointer events for all touches
-    // instead of handling them as scroll/pinch-zoom gestures.
-    canvas.style.touchAction = 'none';
+    // touch-action:none is set in App.css so the browser delivers pointer
+    // events for touch gestures instead of intercepting them as scroll/zoom.
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerup', this.onPointerUp);
@@ -498,11 +499,16 @@ export class FunnelViz {
 
     this.worldGroup.quaternion.premultiply(qY).premultiply(qX);
 
-    // Accumulate velocity for damped coast after pointer release.
-    // Use assignment (not +=) so velocity equals the last gesture delta,
-    // which is the correct coasting speed at the moment of release.
-    this.rotVelY = dTheta;
-    this.rotVelX = dPhi;
+    // Normalise velocity to a nominal 60-fps frame interval (16 ms) so coastdown
+    // speed is consistent regardless of the device's pointer-event delivery rate.
+    // A device firing at 120 Hz sends smaller per-event deltas; scaling by
+    // (16 / elapsed) restores parity with 60-Hz devices.
+    const now = performance.now();
+    const elapsed = Math.max(1, now - this.lastRotEventTime);
+    this.lastRotEventTime = now;
+    const normScale = 16 / elapsed;
+    this.rotVelY = dTheta * normScale;
+    this.rotVelX = dPhi   * normScale;
   }
 
   /**

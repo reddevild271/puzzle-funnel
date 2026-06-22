@@ -35,6 +35,7 @@ function ScoreTag({ hits, blows }: { hits: number; blows: number }) {
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const vizRef = useRef<FunnelViz | null>(null);
+  const panelRef = useRef<HTMLElement>(null);
   // StateSpace is mutable; we hold it in a ref and derive display state from it.
   const stateSpaceRef = useRef(new StateSpace(MASTERMIND_CONFIG));
 
@@ -66,6 +67,41 @@ export default function App() {
     return () => {
       viz.dispose();
       vizRef.current = null;
+    };
+  }, []);
+
+  // ── Keep viz centred in the visible free area above the bottom panel ───────
+  // On mobile (≤480 px) the panel sits at the bottom of the screen and covers
+  // roughly 50% of the viewport.  We measure its actual rendered height and
+  // pass it to FunnelViz so it can shift the camera frustum upward and keep
+  // the sphere visually centred in the unobstructed area.  The same measurement
+  // is re-run whenever the panel resizes (content change, keyboard, orientation).
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    const isMobileLayout = () => window.matchMedia('(max-width: 480px)').matches;
+
+    const update = () => {
+      const viz = vizRef.current;
+      if (!viz) return;
+      // Only apply bottom inset on the mobile breakpoint where the panel is
+      // at the bottom.  On wider screens the panel is on the side and does not
+      // obstruct the vertical centre of the viewport.
+      viz.setBottomInset(isMobileLayout() ? panel.offsetHeight : 0);
+    };
+
+    // Observe panel height changes (content change, colour-picker, keyboard).
+    const ro = new ResizeObserver(update);
+    ro.observe(panel);
+
+    // Also recompute on window resize (breakpoint crossing, orientation change).
+    window.addEventListener('resize', update);
+    update(); // apply immediately after mount
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', update);
     };
   }, []);
 
@@ -127,7 +163,7 @@ export default function App() {
       <canvas ref={canvasRef} className="viz-canvas" />
 
       {/* ── Control panel overlaid on the left ── */}
-      <aside className="panel">
+      <aside className="panel" ref={panelRef}>
         <header className="panel-header">
           <h1 className="title">🔮 Puzzle Funnel</h1>
           <p className="subtitle">Mastermind · Hit &amp; Blow</p>

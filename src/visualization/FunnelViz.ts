@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { Code } from '../engine/types';
 
 // ─── Color palette ────────────────────────────────────────────────────────────
@@ -91,12 +90,36 @@ const OUTER_RADIUS = 28;
 const ACTIVE_SIZE = 4.0;
 const ELIM_SIZE = 1.2;
 
+// ── Camera constants ──────────────────────────────────────────────────────────
+/** Initial camera position (fixed orientation, only distance scales with zoom). */
+const CAM_INIT = new THREE.Vector3(0, 8, 52);
+const CAM_INIT_DIST = CAM_INIT.length(); // ≈ 52.6
+const CAM_MIN = 20;   // minimum zoom distance
+const CAM_MAX = 120;  // maximum zoom distance
+
+// ── Interaction constants ─────────────────────────────────────────────────────
+/** Rotation sensitivity: fraction of viewport width/height → π radians. */
+const ROT_SENS = 2.5;
+/** Per-frame velocity decay for rotation and pan damping (0 = instant, 1 = no decay). */
+const DAMPING = 0.88;
+/** Auto-rotate speed in radians per frame at 60 fps. */
+const AUTO_SPEED = 0.003;
+/** Idle time in ms before auto-rotate resumes after user interaction. */
+const AUTO_RESUME_DELAY = 2500;
+
 export class FunnelViz {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
-  private controls: OrbitControls;
   private clock: THREE.Clock;
+
+  /**
+   * All sphere geometry lives inside worldGroup.
+   * Rotating worldGroup.quaternion spins the sphere around its own local origin —
+   * the pivot is always the sphere centre, regardless of where it has been panned.
+   * worldGroup.position holds the pan offset in world XY.
+   */
+  private worldGroup: THREE.Group;
 
   // Particle system
   private geometry: THREE.BufferGeometry;
@@ -120,6 +143,44 @@ export class FunnelViz {
   private states: ParticleState[];
   private readonly count: number;
 
+  // ── Camera state ──────────────────────────────────────────────────────────
+  /** Current camera distance from the coordinate origin (zoom level). */
+  private camDist = CAM_INIT_DIST;
+  /**
+   * World-XY offset of the sphere group.
+   * The camera direction is fixed; panning moves the sphere in world space so
+   * it appears to shift on screen without changing the rotation pivot.
+   */
+  private panWorld = new THREE.Vector2();
+
+  // ── Rotation velocity (for inertia / damping) ─────────────────────────────
+  /** Angular velocity around camera's right axis (vertical drag). */
+  private rotVelX = 0;
+  /** Angular velocity around world Y axis (horizontal drag). */
+  private rotVelY = 0;
+
+  // ── Pointer tracking ──────────────────────────────────────────────────────
+  /** Active pointer positions keyed by pointerId. */
+  private pointers = new Map<number, { x: number; y: number }>();
+  /** Centroid of the previous frame's two-pointer positions. */
+  private prevCentroid = new THREE.Vector2();
+  /** Distance between two pointers on the previous frame. */
+  private prevSpread = 0;
+  /**
+   * True while two or more pointers are active (pan/zoom mode).
+   * Cleared on the frame after all extra pointers are released so a stale
+   * pointer position cannot contaminate the first rotate delta.
+   */
+  private isPanMode = false;
+
+  // ── Auto-rotate ───────────────────────────────────────────────────────────
+  private autoRotating = true;
+  private autoResumeTimer = 0;
+
+  // ── Viewport centering ────────────────────────────────────────────────────
+  /** Height in CSS px of the bottom UI panel (set by App via setBottomInset). */
+  private bottomInset = 0;
+
   private animFrameId = 0;
   private resizeObserver: ResizeObserver;
 
@@ -134,7 +195,7 @@ export class FunnelViz {
     const w = canvas.clientWidth || window.innerWidth;
     const h = canvas.clientHeight || window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 500);
-    this.camera.position.set(0, 8, 52);
+    this.positionCamera();
 
     // ── Renderer ───────────────────────────────────────────────────────────
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -142,14 +203,11 @@ export class FunnelViz {
     this.renderer.setSize(w, h, false);
     this.renderer.setClearColor(0x050510, 1);
 
-    // ── Controls ───────────────────────────────────────────────────────────
-    this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.05;
-    this.controls.autoRotate = true;
-    this.controls.autoRotateSpeed = 0.4;
-    this.controls.minDistance = 20;
-    this.controls.maxDistance = 120;
+    // ── World group ────────────────────────────────────────────────────────
+    // All sphere geometry lives here so rotation/pan transforms are cleanly
+    // separated: worldGroup.quaternion = spin, worldGroup.position = pan offset.
+    this.worldGroup = new THREE.Group();
+    this.scene.add(this.worldGroup);
 
     // ── Pre-compute positions and base colours ──────────────────────────────
     this.innerPos = fibonacciSphere(this.count, INNER_RADIUS);
@@ -194,9 +252,11 @@ export class FunnelViz {
       depthWrite: false,
     });
 
-    this.scene.add(new THREE.Points(this.geometry, material));
+    this.worldGroup.add(new THREE.Points(this.geometry, material));
 
     // ── Background star field ───────────────────────────────────────────────
+    // Stars are added to the scene (not worldGroup) so they never rotate/pan
+    // with the sphere and provide a stable frame of reference.
     this.buildStarField();
 
     // ── Reference sphere wireframe ─────────────────────────────────────────
@@ -207,7 +267,17 @@ export class FunnelViz {
       transparent: true,
       opacity: 0.08,
     });
-    this.scene.add(new THREE.Mesh(sphereGeo, sphereMat));
+    this.worldGroup.add(new THREE.Mesh(sphereGeo, sphereMat));
+
+    // ── Pointer interaction ─────────────────────────────────────────────────
+    // touch-action:none lets the browser deliver pointer events for all touches
+    // instead of handling them as scroll/pinch-zoom gestures.
+    canvas.style.touchAction = 'none';
+    canvas.addEventListener('pointerdown', this.onPointerDown);
+    canvas.addEventListener('pointermove', this.onPointerMove);
+    canvas.addEventListener('pointerup', this.onPointerUp);
+    canvas.addEventListener('pointercancel', this.onPointerUp);
+    canvas.addEventListener('wheel', this.onWheel, { passive: false });
 
     // ── Responsive resize ───────────────────────────────────────────────────
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -231,10 +301,26 @@ export class FunnelViz {
     }
   }
 
+  /**
+   * Set the height (CSS px) of the bottom UI panel so the sphere is initially
+   * centered in the visible free area above it.
+   * Call this whenever the panel height changes (resize, orientation change).
+   */
+  setBottomInset(inset: number): void {
+    this.bottomInset = inset;
+    this.applyViewOffset();
+  }
+
   dispose(): void {
     cancelAnimationFrame(this.animFrameId);
+    clearTimeout(this.autoResumeTimer);
     this.resizeObserver.disconnect();
-    this.controls.dispose();
+    const canvas = this.renderer.domElement;
+    canvas.removeEventListener('pointerdown', this.onPointerDown);
+    canvas.removeEventListener('pointermove', this.onPointerMove);
+    canvas.removeEventListener('pointerup', this.onPointerUp);
+    canvas.removeEventListener('pointercancel', this.onPointerUp);
+    canvas.removeEventListener('wheel', this.onWheel);
     this.scene.traverse((object) => {
       if ('geometry' in object) {
         const geometry = object.geometry as THREE.BufferGeometry | undefined;
@@ -250,6 +336,198 @@ export class FunnelViz {
       }
     });
     this.renderer.dispose();
+  }
+
+  // ── Camera helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Position the camera along the fixed initial ray at the current zoom distance.
+   * The camera direction never changes — only the distance scales.  This keeps
+   * the camera's right/up axes constant so rotation input mapping is predictable.
+   */
+  private positionCamera(): void {
+    const scale = this.camDist / CAM_INIT_DIST;
+    this.camera.position.copy(CAM_INIT).multiplyScalar(scale);
+    this.camera.lookAt(0, 0, 0);
+    // Ensure matrixWorld is up-to-date for right/up axis lookups in rotate/pan.
+    this.camera.updateMatrixWorld();
+  }
+
+  /**
+   * Shift the camera's projection frustum so the coordinate origin (where the
+   * sphere starts before any pan) appears at the centre of the free viewport
+   * above the bottom UI panel.
+   *
+   * On orientation change this is re-called with the same bottomInset so the
+   * sphere stays in the free area without resetting its world position.
+   */
+  private applyViewOffset(): void {
+    const canvas = this.renderer.domElement;
+    const w = canvas.clientWidth || 1;
+    const h = canvas.clientHeight || 1;
+    const freeH = h - this.bottomInset;
+    if (freeH <= 0) return;
+
+    // Shift the virtual frustum DOWN by half the panel height.
+    // This remaps the frustum centre from (w/2, h/2) to (w/2, freeH/2) on the
+    // actual canvas, so the sphere at world origin appears at the free-area centre.
+    const dy = (h - freeH) / 2; // = bottomInset / 2
+    this.camera.setViewOffset(w, h, 0, dy, w, h);
+    this.camera.updateProjectionMatrix();
+  }
+
+  // ── Pointer event handlers ─────────────────────────────────────────────────
+
+  private onPointerDown = (e: PointerEvent): void => {
+    // Capture the pointer so moves/ups are received even outside the canvas.
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // Stop auto-rotate on first touch; cancel any pending resume.
+    this.autoRotating = false;
+    clearTimeout(this.autoResumeTimer);
+
+    if (this.pointers.size >= 2) {
+      // Transition to pan/zoom mode.
+      // Clear stale rotate velocity so it cannot contaminate the first pan frame.
+      this.rotVelX = 0;
+      this.rotVelY = 0;
+      this.isPanMode = true;
+      const [a, b] = [...this.pointers.values()];
+      this.prevCentroid.set((a.x + b.x) / 2, (a.y + b.y) / 2);
+      this.prevSpread = Math.hypot(b.x - a.x, b.y - a.y);
+    } else {
+      this.isPanMode = false;
+    }
+  };
+
+  private onPointerMove = (e: PointerEvent): void => {
+    const prev = this.pointers.get(e.pointerId);
+    if (!prev) return;
+
+    // Update stored position AFTER reading prev so delta is correct.
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (this.pointers.size === 1 && !this.isPanMode) {
+      // ── 1-pointer: rotate sphere in object space ──────────────────────────
+      // Rotation is applied to worldGroup.quaternion, so the pivot is always
+      // the sphere's local origin regardless of the current pan offset.
+      const dx = e.clientX - prev.x;
+      const dy = e.clientY - prev.y;
+      this.applyRotation(dx, dy);
+
+    } else if (this.pointers.size >= 2) {
+      // ── 2-pointer: pan sphere world position + pinch zoom ─────────────────
+      const pts = [...this.pointers.values()];
+      const cx = (pts[0].x + pts[1].x) / 2;
+      const cy = (pts[0].y + pts[1].y) / 2;
+      const spread = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+
+      this.applyPan(cx - this.prevCentroid.x, cy - this.prevCentroid.y);
+
+      // Pinch zoom: ratio of previous/current spread scales the camera distance.
+      if (this.prevSpread > 1) {
+        this.camDist = Math.max(
+          CAM_MIN,
+          Math.min(CAM_MAX, this.camDist * (this.prevSpread / spread)),
+        );
+        this.positionCamera();
+      }
+
+      this.prevCentroid.set(cx, cy);
+      this.prevSpread = spread;
+    }
+  };
+
+  private onPointerUp = (e: PointerEvent): void => {
+    const prevSize = this.pointers.size;
+    this.pointers.delete(e.pointerId);
+
+    if (this.pointers.size === 0) {
+      // All fingers lifted — schedule auto-rotate resumption.
+      this.autoResumeTimer = window.setTimeout(() => {
+        this.autoRotating = true;
+      }, AUTO_RESUME_DELAY);
+
+    } else if (prevSize >= 2 && this.pointers.size === 1) {
+      // ── 2-finger → 1-finger transition ───────────────────────────────────
+      // Finalize pan: clear pan velocity and stale rotate velocity so neither
+      // contaminates the next 1-finger rotate gesture.
+      this.isPanMode = false;
+      this.rotVelX = 0;
+      this.rotVelY = 0;
+      // Seed prevCentroid to the surviving pointer so the first rotate delta
+      // starts from the correct position on the next pointermove.
+      const [p] = [...this.pointers.values()];
+      this.prevCentroid.set(p.x, p.y);
+    }
+  };
+
+  private onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    // Normalise across different deltaMode values.
+    const delta = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
+    this.camDist = Math.max(CAM_MIN, Math.min(CAM_MAX, this.camDist + delta * 0.05));
+    this.positionCamera();
+  };
+
+  // ── Interaction helpers ────────────────────────────────────────────────────
+
+  /**
+   * Rotate worldGroup in world space based on a screen-pixel drag delta.
+   * Pre-multiplying quaternions applies rotation in world space, so the pivot
+   * is always the object's own centre.
+   */
+  private applyRotation(dx: number, dy: number): void {
+    const canvas = this.renderer.domElement;
+    const w = canvas.clientWidth || 1;
+    const h = canvas.clientHeight || 1;
+
+    // Map pixel delta → radians (full viewport width/height = π * ROT_SENS radians).
+    const dTheta = -(dx / w) * Math.PI * ROT_SENS;
+    const dPhi   = -(dy / h) * Math.PI * ROT_SENS;
+
+    // Horizontal drag → rotate around world Y axis.
+    const qY = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 1, 0), dTheta,
+    );
+    // Vertical drag → rotate around the camera's right axis so "up on screen"
+    // always means "up" regardless of the current sphere orientation.
+    const camRight = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+    const qX = new THREE.Quaternion().setFromAxisAngle(camRight, dPhi);
+
+    this.worldGroup.quaternion.premultiply(qY).premultiply(qX);
+
+    // Accumulate velocity for damped coast after pointer release.
+    // Use assignment (not +=) so velocity equals the last gesture delta,
+    // which is the correct coasting speed at the moment of release.
+    this.rotVelY = dTheta;
+    this.rotVelX = dPhi;
+  }
+
+  /**
+   * Translate the sphere's world position by a screen-pixel pan delta.
+   * The camera direction is fixed so the sphere appears to move on screen,
+   * and the rotation pivot (worldGroup's local origin) moves with it.
+   */
+  private applyPan(dcx: number, dcy: number): void {
+    const canvas = this.renderer.domElement;
+    const h = canvas.clientHeight || 1;
+
+    // World height visible at the current camera distance.
+    const vFov = this.camera.fov * THREE.MathUtils.DEG2RAD;
+    const worldHeight = 2 * Math.tan(vFov / 2) * this.camDist;
+    const pxToWorld = worldHeight / h;
+
+    // Camera right and up in world space (matrixWorld is kept current by positionCamera).
+    const camRight = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+    const camUp    = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+
+    // Drag right/down → sphere moves right/down in screen space.
+    this.panWorld.x += (dcx * camRight.x - dcy * camUp.x) * pxToWorld;
+    this.panWorld.y += (dcx * camRight.y - dcy * camUp.y) * pxToWorld;
+
+    this.worldGroup.position.set(this.panWorld.x, this.panWorld.y, 0);
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
@@ -282,9 +560,13 @@ export class FunnelViz {
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
     if (w === 0 || h === 0) return;
+
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    // Recompute the frustum offset for the (possibly new) panel height and
+    // canvas dimensions. This preserves the world state (panWorld, quaternion)
+    // so the current focal point stays in the free-space area after orientation change.
+    this.applyViewOffset();
   }
 
   private animate = (): void => {
@@ -339,7 +621,29 @@ export class FunnelViz {
       this.opacityAttr.needsUpdate = true;
     }
 
-    this.controls.update();
+    // ── Auto-rotate sphere around world Y when idle ────────────────────────
+    if (this.autoRotating) {
+      const qAuto = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0),
+        AUTO_SPEED,
+      );
+      this.worldGroup.quaternion.premultiply(qAuto);
+    } else if (this.pointers.size === 0) {
+      // Apply damped rotation inertia only when no pointer is active.
+      // While a pointer is active, rotation is applied directly in applyRotation()
+      // to avoid double-application.
+      if (Math.abs(this.rotVelX) > 1e-5 || Math.abs(this.rotVelY) > 1e-5) {
+        const qY = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0), this.rotVelY,
+        );
+        const camRight = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+        const qX = new THREE.Quaternion().setFromAxisAngle(camRight, this.rotVelX);
+        this.worldGroup.quaternion.premultiply(qY).premultiply(qX);
+        this.rotVelX *= DAMPING;
+        this.rotVelY *= DAMPING;
+      }
+    }
+
     this.renderer.render(this.scene, this.camera);
   };
 }

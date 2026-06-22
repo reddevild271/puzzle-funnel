@@ -36,6 +36,17 @@ npm run build    # compiles TypeScript then bundles with Vite
 npm run preview  # serves the dist/ folder locally
 ```
 
+### Browser-based testing with GitHub Pages
+
+If local tooling is limited, you can test the app directly from a browser:
+
+1. Push changes to the `main` branch
+2. In GitHub, enable **Settings → Pages → Source: GitHub Actions**
+3. Let the **Deploy to GitHub Pages** workflow publish the latest `dist/` build
+4. Open the published Pages URL on your laptop or phone
+
+The Vite config automatically switches to the repository subpath during GitHub Actions builds, so deployed assets load correctly on Pages.
+
 ---
 
 ## How to Use

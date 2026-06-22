@@ -1,9 +1,17 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const repositoryName = process.env.GITHUB_REPOSITORY?.split('/')[1]
+const processEnv = (
+  globalThis as {
+    process?: {
+      env?: Record<string, string | undefined>
+    }
+  }
+).process?.env
+
+const repositoryName = processEnv?.GITHUB_REPOSITORY?.split('/')[1]
 const base =
-  process.env.GITHUB_ACTIONS === 'true' && repositoryName
+  processEnv?.GITHUB_ACTIONS === 'true' && repositoryName
     ? `/${repositoryName}/`
     : '/'
 

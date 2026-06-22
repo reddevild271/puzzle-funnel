@@ -364,15 +364,20 @@ export class FunnelViz {
    */
   private applyViewOffset(): void {
     const canvas = this.renderer.domElement;
-    const w = canvas.clientWidth || 1;
-    const h = canvas.clientHeight || 1;
-    const freeH = h - this.bottomInset;
-    if (freeH <= 0) return;
+    const pr = this.renderer.getPixelRatio();
+    const w = (canvas.clientWidth || 1) * pr;
+    const h = (canvas.clientHeight || 1) * pr;
+    const freeH = h - this.bottomInset * pr;
+    if (freeH <= 0) {
+      this.camera.clearViewOffset();
+      this.camera.updateProjectionMatrix();
+      return;
+    }
 
     // Shift the virtual frustum DOWN by half the panel height.
     // This remaps the frustum centre from (w/2, h/2) to (w/2, freeH/2) on the
     // actual canvas, so the sphere at world origin appears at the free-area centre.
-    const dy = (h - freeH) / 2; // = bottomInset / 2
+    const dy = (h - freeH) / 2; // = bottomInset * pr / 2
     this.camera.setViewOffset(w, h, 0, dy, w, h);
     this.camera.updateProjectionMatrix();
   }
@@ -427,7 +432,8 @@ export class FunnelViz {
       this.applyPan(cx - this.prevCentroid.x, cy - this.prevCentroid.y);
 
       // Pinch zoom: ratio of previous/current spread scales the camera distance.
-      if (this.prevSpread > 1) {
+      // Guard spread > 1 to avoid division by zero when pointers overlap.
+      if (this.prevSpread > 1 && spread > 1) {
         this.camDist = Math.max(
           CAM_MIN,
           Math.min(CAM_MAX, this.camDist * (this.prevSpread / spread)),
@@ -452,8 +458,8 @@ export class FunnelViz {
 
     } else if (prevSize >= 2 && this.pointers.size === 1) {
       // ── 2-finger → 1-finger transition ───────────────────────────────────
-      // Finalize pan: clear pan velocity and stale rotate velocity so neither
-      // contaminates the next 1-finger rotate gesture.
+      // Clear stale rotate velocity so it cannot contaminate the next 1-finger
+      // rotate gesture.
       this.isPanMode = false;
       this.rotVelX = 0;
       this.rotVelY = 0;
@@ -504,7 +510,9 @@ export class FunnelViz {
     // A device firing at 120 Hz sends smaller per-event deltas; scaling by
     // (16 / elapsed) restores parity with 60-Hz devices.
     const now = performance.now();
-    const elapsed = Math.max(1, now - this.lastRotEventTime);
+    // Seed a nominal 16 ms interval on the very first event (lastRotEventTime === 0)
+    // to avoid a near-zero normScale that would suppress inertia on the first drag.
+    const elapsed = this.lastRotEventTime === 0 ? 16 : Math.max(1, now - this.lastRotEventTime);
     this.lastRotEventTime = now;
     const normScale = 16 / elapsed;
     this.rotVelY = dTheta * normScale;

@@ -235,7 +235,20 @@ export class FunnelViz {
     cancelAnimationFrame(this.animFrameId);
     this.resizeObserver.disconnect();
     this.controls.dispose();
-    this.geometry.dispose();
+    this.scene.traverse((object) => {
+      if ('geometry' in object) {
+        const geometry = object.geometry as THREE.BufferGeometry | undefined;
+        geometry?.dispose();
+      }
+      if ('material' in object) {
+        const material = object.material as THREE.Material | THREE.Material[] | undefined;
+        if (Array.isArray(material)) {
+          material.forEach((m) => m.dispose());
+        } else {
+          material?.dispose();
+        }
+      }
+    });
     this.renderer.dispose();
   }
 

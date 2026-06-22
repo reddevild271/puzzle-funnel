@@ -180,9 +180,11 @@ export default function App() {
             {guess.map((c, i) => (
               <button
                 key={i}
+                type="button"
                 className={`peg-btn${editingPeg === i ? ' peg-btn--active' : ''}`}
                 style={{ backgroundColor: COLOR_HEX[c] }}
                 onClick={() => setEditingPeg(editingPeg === i ? null : i)}
+                aria-label={`Peg ${i + 1}: ${COLOR_NAMES[c]} (click to change)`}
                 title={`Peg ${i + 1}: ${COLOR_NAMES[c]} — click to change`}
               />
             ))}
@@ -196,9 +198,11 @@ export default function App() {
                 {COLOR_HEX.map((hex, ci) => (
                   <button
                     key={ci}
+                    type="button"
                     className={`color-dot${guess[editingPeg] === ci ? ' color-dot--selected' : ''}`}
                     style={{ backgroundColor: hex }}
                     onClick={() => selectColor(ci)}
+                    aria-label={`Set peg ${editingPeg + 1} to ${COLOR_NAMES[ci]}`}
                     title={COLOR_NAMES[ci]}
                   />
                 ))}

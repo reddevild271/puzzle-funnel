@@ -18,7 +18,7 @@ The shrinking cluster of active particles makes the *funnelling* of information 
 
 ### Prerequisites
 
-- **Node.js 18+** and **npm 9+**
+- **Node.js ^20.19.0 or >=22.12.0** and **npm 9+**
 
 ### Install & run locally
 
@@ -91,7 +91,7 @@ The `engine/` layer is designed to work for any puzzle where the state space can
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| TypeScript | 5.4 | Type safety throughout |
+| TypeScript | 5.x | Type safety throughout |
 | Vite | 8.0 | Build tool & dev server |
 | React | 18 | UI components |
 | Three.js | 0.165 | 3D WebGL rendering |
@@ -105,4 +105,3 @@ The `engine/` layer is designed to work for any puzzle where the state space can
 - **Strategy comparison** — render two game paths side-by-side
 - **WebGPU renderer** for larger state spaces (e.g. 5-peg, 8-color = 32,768 codes)
 - Generalize to other puzzles (Simon Tatham's collection, Wordle, …)
-

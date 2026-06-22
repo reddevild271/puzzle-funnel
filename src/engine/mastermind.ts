@@ -10,6 +10,10 @@ import type { Code, Score, Constraint, PuzzleConfig } from './types';
  * account for one hit or one blow, whichever applies first.
  */
 export function scoreGuess(guess: Code, secret: Code): Score {
+  if (guess.length !== secret.length) {
+    throw new Error(`Guess and secret must have the same length: got ${guess.length} and ${secret.length}`);
+  }
+
   const n = guess.length;
   let hits = 0;
   const guessLeft: number[] = [];
